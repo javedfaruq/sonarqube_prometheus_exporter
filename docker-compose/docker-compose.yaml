@@ -1,25 +1,129 @@
-version: '3'
+version: '3.8'
+
 services:
-  grafana:
-    image: "grafana/grafana"
-    ports:
-      - "3000:3000"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f localhost:3000/api/health && echo 'ready'"]
-      interval: 10s
-      retries: 30
-  prometheus:
-    image: "prom/prometheus"
-    volumes:
-      - "${PROMETHEUS_CONFIG}:/etc/prometheus/prometheus.yml"
-      - "./config/prometheus.rules:/etc/prometheus/prometheus.rules.yml"
-    ports:
-      - "9090:9090"
+  # SonarQube Exporter
   sonarqube-exporter:
-    image: "return200/sonarqube-exporter"
-    env_file:
-      - "${PROD_ENV}"
-    volumes:
-      - "/tmp:/tmp"
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: sonarqube-exporter
     ports:
       - "8198:8198"
+    environment:
+      # Basic Configuration
+      - SONARQUBE_SERVER=${SONARQUBE_SERVER}
+      - SONARQUBE_TOKEN=${SONARQUBE_TOKEN}
+      - SONARQUBE_VERIFY_SSL=${SONARQUBE_VERIFY_SSL:-true}
+      
+      # Exporter Settings
+      - EXPORTER_PORT=8198
+      - SCRAPE_INTERVAL=${SCRAPE_INTERVAL:-60}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-30}
+      
+      # Rate Limiting (Enterprise 2025)
+      - RATE_LIMIT_REQUESTS_PER_MINUTE=${RATE_LIMIT_REQUESTS_PER_MINUTE:-500}
+      - RATE_LIMIT_DELAY=${RATE_LIMIT_DELAY:-0.12}
+      - RETRY_ATTEMPTS=${RETRY_ATTEMPTS:-3}
+      - RETRY_BACKOFF_SECONDS=${RETRY_BACKOFF_SECONDS:-2}
+      
+      # Pagination
+      - MAX_PROJECTS=${MAX_PROJECTS:-0}
+      - PAGE_SIZE=${PAGE_SIZE:-100}
+      - MAX_CONCURRENT_REQUESTS=${MAX_CONCURRENT_REQUESTS:-5}
+      
+      # Enterprise Features
+      - INCLUDE_ENTERPRISE_FEATURES=${INCLUDE_ENTERPRISE_FEATURES:-true}
+      - INCLUDE_BRANCHES=${INCLUDE_BRANCHES:-true}
+      - INCLUDE_APPLICATIONS=${INCLUDE_APPLICATIONS:-true}
+      - INCLUDE_PORTFOLIOS=${INCLUDE_PORTFOLIOS:-true}
+      
+      # RBAC
+      - ENABLE_RBAC=${ENABLE_RBAC:-true}
+      - RBAC_CACHE_TTL=${RBAC_CACHE_TTL:-300}
+      
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8198/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    restart: unless-stopped
+    
+    networks:
+      - monitoring
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    restart: unless-stopped
+    networks:
+      - monitoring
+    depends_on:
+      - sonarqube-exporter
+
+  # Grafana with RBAC
+  grafana:
+    image: grafana/grafana:10.2.2
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # Admin credentials
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      
+      # Security settings
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_USERS_ALLOW_SIGN_UP=false
+      
+      # SonarQube OAuth (optional)
+      - GF_AUTH_GENERIC_OAUTH_ENABLED=${ENABLE_SONARQUBE_OAUTH:-false}
+      - GF_AUTH_GENERIC_OAUTH_NAME=SonarQube
+      - GF_AUTH_GENERIC_OAUTH_CLIENT_ID=${SONARQUBE_OAUTH_CLIENT_ID:-}
+      - GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET=${SONARQUBE_OAUTH_CLIENT_SECRET:-}
+      - GF_AUTH_GENERIC_OAUTH_AUTH_URL=${SONARQUBE_SERVER}/oauth2/authorize
+      - GF_AUTH_GENERIC_OAUTH_TOKEN_URL=${SONARQUBE_SERVER}/oauth2/token
+      - GF_AUTH_GENERIC_OAUTH_API_URL=${SONARQUBE_SERVER}/api/user/show
+      
+      # RBAC Settings
+      - GF_USERS_AUTO_ASSIGN_ORG_ROLE=Viewer
+      - GF_AUTH_BASIC_ENABLED=true
+      
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./config/grafana-datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+      - ./dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ../dashboards:/var/lib/grafana/dashboards:ro
+    
+    restart: unless-stopped
+    networks:
+      - monitoring
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+networks:
+  monitoring:
+    driver: bridge
